@@ -155,17 +155,71 @@ def check_latency_max_ms(
   return check_duration_max_ms(response, assertion)
 
 
+# Looker measure `type_` values as they appear in a CA DataResult schema. Anything
+# NOT in this set (string, date_*, yesno, number, tier, location, ...) is treated as
+# a dimension. Unknowns fall to "dimension" on purpose — that only makes the
+# empty-group filter below stricter (safe direction), never more aggressive.
+_MEASURE_TYPES = frozenset({
+    "sum",
+    "count",
+    "count_distinct",
+    "average",
+    "sum_distinct",
+    "average_distinct",
+    "median",
+    "min",
+    "max",
+    "percentile",
+    "percentile_distinct",
+    "running_total",
+})
+
+
+def _dimension_field_names(result: Any) -> list[str]:
+  """Names of the non-measure (dimension) fields in a DataResult schema."""
+  dims = []
+  schema = getattr(result, "schema", None)
+  for field in getattr(schema, "fields", []) or []:
+    field_type = (getattr(field, "type_", "") or "").lower()
+    if field_type not in _MEASURE_TYPES:
+      dims.append(field.name)
+  return dims
+
+
+def _is_empty_group_row(row: dict[str, Any], dim_fields: list[str]) -> bool:
+  """True for a row whose every dimension value is null/empty.
+
+  Such a row is the benign "no group" bucket that a LEFT-joining explore root
+  produces (e.g. a Looker model rooted at `customers` that LEFT-joins outward
+  yields a NULL-dimension, all-zero-measure row for childless entities). It is
+  never a meaningful analytical group, so it must not inflate a row count — that
+  is the `data-check-row-count` "artifact" where a correct Looker answer returned
+  golden+1 rows. Graph results have no such row, so this is a no-op for them.
+  """
+  if not dim_fields:
+    return False
+  return all(row.get(d) in (None, "") for d in dim_fields)
+
+
 def _get_last_data_result(
     response: AskQuestionResponse,
 ) -> list[dict[str, Any]] | None:
-  """Retrieves the last data result from the response, if any."""
+  """Retrieves the last data result from the response, if any.
+
+  Empty-group rows (all dimensions null — the LEFT-join root artifact) are
+  dropped so row counts reflect the meaningful result, matching the golden SQL
+  and the graph agent. See `_is_empty_group_row`.
+  """
   for message in reversed(response.protobuf_response):
     if "system_message" in message:
       sys_msg = message.system_message
       if "data" in sys_msg and "result" in sys_msg.data:
         # sys_msg.data.result.data is a repeated Struct (ListValue equivalent)
         # Convert to list of dicts
-        return [dict(row) for row in sys_msg.data.result.data]
+        result = sys_msg.data.result
+        dim_fields = _dimension_field_names(result)
+        rows = [dict(row) for row in result.data]
+        return [r for r in rows if not _is_empty_group_row(r, dim_fields)]
   return None
 
 

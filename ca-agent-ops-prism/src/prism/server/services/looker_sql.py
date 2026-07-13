@@ -94,22 +94,42 @@ def _iter_looker_data_messages(response: Any):
       continue
     if data.get("generated_sql") or data.get("generatedSql"):
       continue  # already have SQL (e.g. a BigQuery message) — leave it
-    looker_query = data.get("generated_looker_query") or data.get(
-        "generatedLookerQuery"
-    )
-    if not isinstance(looker_query, dict):
+    looker_query = _extract_looker_query(data)
+    if not looker_query:
       continue
     if not (looker_query.get("model") and looker_query.get("explore")):
       continue
     yield data, looker_query
 
 
+def _extract_looker_query(data: dict) -> dict | None:
+  """Locates the LookerQuery spec inside a DataMessage dict.
+
+  In practice the CA agent nests it under `data.query.looker` (a Query whose
+  `looker` field is the LookerQuery). The proto also has a top-level
+  `generated_looker_query`; we accept either. Tolerates camelCase.
+  """
+  query = data.get("query")
+  if isinstance(query, dict):
+    looker = query.get("looker")
+    if isinstance(looker, dict) and looker.get("model"):
+      return looker
+  gen = data.get("generated_looker_query") or data.get("generatedLookerQuery")
+  if isinstance(gen, dict) and gen.get("model"):
+    return gen
+  return None
+
+
 def _write_query_from_looker(looker_query: dict) -> "looker_models.WriteQuery":
   """Maps a CA `LookerQuery` dict to a Looker SDK `WriteQuery`."""
+  raw_filters = looker_query.get("filters")
   filters = {}
-  for f in looker_query.get("filters") or []:
-    if isinstance(f, dict) and f.get("field"):
-      filters[f["field"]] = f.get("value", "")
+  if isinstance(raw_filters, dict):
+    filters = {k: v for k, v in raw_filters.items() if k}
+  elif isinstance(raw_filters, list):
+    for f in raw_filters:
+      if isinstance(f, dict) and f.get("field"):
+        filters[f["field"]] = f.get("value", "")
   limit = looker_query.get("limit")
   return looker_models.WriteQuery(
       model=looker_query["model"],

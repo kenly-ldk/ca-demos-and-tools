@@ -14,23 +14,25 @@
 
 """Recover the compiled BigQuery SQL for Looker Conversational Analytics agents.
 
-The CA API returns a *Looker query* (model / explore / fields / filters / sorts /
-limit) for a Looker datasource, never the compiled SQL: Looker itself compiles
-LookML -> SQL and runs it internally, so the SQL never travels back in the chat
-stream (`DataMessage.generated_sql` stays empty; only `generated_looker_query` is
-populated).
+The CA API returns a *Looker query* (nested at a DataMessage's `query.looker`:
+model / explore / fields / filters / sorts / limit) for a Looker datasource, never
+the compiled SQL: Looker itself compiles LookML -> SQL and runs it internally, so
+the SQL never travels back in the chat stream (`DataMessage.generated_sql` stays
+empty).
 
 This module re-compiles that query spec through the Looker API (create the query,
 then fetch `result_format="sql"`, which returns the generated SQL WITHOUT executing
-it against BigQuery) and writes the result onto the DataMessage's `generated_sql`
-field. Both the trace UI's "Generated SQL" panel and the
-`query-contains` assertion read `generated_sql`, so both start working for Looker
-agents once this runs.
+it against BigQuery) and inserts the result as a NEW `generated_sql` DataMessage
+right after the Looker query message. The Looker query message is left intact, so
+the trace shows BOTH — a "Data Query" panel (the Looker query) AND a "Generated
+SQL" panel — mirroring how a BigQuery agent already emits separate query and
+generated_sql messages. Both the trace UI and the `query-contains` assertion read
+`generated_sql`, so both start working for Looker agents once this runs.
 
 It mutates the `AskQuestionResponse.response` list of dicts in place — that list is
 the single source of truth (the `protobuf_response` property re-parses it on every
-access, and the trial trace is re-serialized from it), so writing there reaches
-every downstream consumer.
+access, and the trial trace is re-serialized from it), so the inserted message
+reaches every downstream consumer.
 
 Best-effort and fail-safe by design: it never raises. Any auth/compile failure is
 logged and leaves the response untouched (SQL simply stays absent, as before).
@@ -76,30 +78,48 @@ def _make_looker_sdk(base_url: str, client_id: str, client_secret: str):
   return looker_sdk.init40(config_settings=_LookerSettings())
 
 
-def _iter_looker_data_messages(response: Any):
-  """Yields the DataMessage dicts that hold a Looker query but no SQL yet.
+def _data_dict(item: Any) -> dict | None:
+  """Returns a message's system_message.data dict, or None."""
+  if not isinstance(item, dict):
+    return None
+  sys_msg = item.get("system_message") or item.get("systemMessage")
+  if not isinstance(sys_msg, dict):
+    return None
+  data = sys_msg.get("data")
+  return data if isinstance(data, dict) else None
+
+
+def _iter_looker_query_messages(items: list):
+  """Yields (index, looker_query) for each DataMessage holding a Looker query.
 
   Works on the snake_case dicts in `response.response` (built by the client with
   `preserving_proto_field_name=True`), tolerating camelCase just in case.
   """
-  items = getattr(response, "response", None) or []
-  for item in items:
-    if not isinstance(item, dict):
+  for idx, item in enumerate(items):
+    data = _data_dict(item)
+    if data is None:
       continue
-    sys_msg = item.get("system_message") or item.get("systemMessage")
-    if not isinstance(sys_msg, dict):
-      continue
-    data = sys_msg.get("data")
-    if not isinstance(data, dict):
-      continue
-    if data.get("generated_sql") or data.get("generatedSql"):
-      continue  # already have SQL (e.g. a BigQuery message) — leave it
     looker_query = _extract_looker_query(data)
     if not looker_query:
       continue
     if not (looker_query.get("model") and looker_query.get("explore")):
       continue
-    yield data, looker_query
+    yield idx, looker_query
+
+
+def _make_generated_sql_message(source_item: Any, sql: str) -> dict:
+  """A synthetic DataMessage carrying only the recovered SQL.
+
+  Inserting this as its OWN message (rather than adding `generated_sql` to the
+  Looker query's message) mirrors how a BigQuery agent already lays out its trace
+  — separate `query` and `generated_sql` messages — so PRISM's timeline renders
+  BOTH the "Data Query" (the Looker query) and a "Generated SQL" panel. It also
+  keeps the original Looker query message untouched.
+  """
+  msg: dict = {"system_message": {"data": {"generated_sql": sql}}}
+  if isinstance(source_item, dict) and source_item.get("timestamp"):
+    msg["timestamp"] = source_item["timestamp"]
+  return msg
 
 
 def _extract_looker_query(data: dict) -> dict | None:
@@ -142,15 +162,19 @@ def _write_query_from_looker(looker_query: dict) -> "looker_models.WriteQuery":
 
 
 def recover_generated_sql(response: Any, agent: Any) -> int:
-  """Populate `generated_sql` on Looker DataMessages in `response`, in place.
+  """Add a recovered-SQL DataMessage after each Looker query, in place.
+
+  For each Looker query message, re-compiles the query to SQL via the Looker API
+  and inserts a NEW `generated_sql` DataMessage right after it (leaving the Looker
+  query message intact), so the trace shows BOTH. Mutates `response.response`.
 
   Args:
       response: an AskQuestionResponse (mutated in place via `.response`).
       agent: the Agent model (for Looker instance URI + client credentials).
 
   Returns:
-      The number of data messages enriched with recovered SQL (0 if not a Looker
-      agent, credentials/SDK missing, nothing to recover, or every attempt failed).
+      The number of recovered-SQL messages inserted (0 if not a Looker agent,
+      credentials/SDK missing, nothing to recover, or every attempt failed).
   """
   if looker_sdk is None:
     return 0
@@ -161,8 +185,19 @@ def recover_generated_sql(response: Any, agent: Any) -> int:
   if not (base_url and client_id and client_secret):
     return 0  # not a Looker agent, or missing creds
 
+  items = getattr(response, "response", None)
+  if not isinstance(items, list):
+    return 0
+
+  # If any data message already carries SQL, do nothing: either a BigQuery agent
+  # (SQL is native) or a Looker response we already enriched (idempotent).
+  for item in items:
+    data = _data_dict(item)
+    if data and (data.get("generated_sql") or data.get("generatedSql")):
+      return 0
+
   # Collect work first so we only authenticate when there is SQL to recover.
-  targets = list(_iter_looker_data_messages(response))
+  targets = list(_iter_looker_query_messages(items))
   if not targets:
     return 0
 
@@ -172,8 +207,10 @@ def recover_generated_sql(response: Any, agent: Any) -> int:
     logger.warning("Looker SQL recovery: SDK init failed: %s", e)
     return 0
 
-  enriched = 0
-  for data, looker_query in targets:
+  # Recover SQL per query message (index -> sql), then insert the synthetic
+  # messages from the highest index down so earlier indices stay valid.
+  recovered: list[tuple[int, str]] = []
+  for idx, looker_query in targets:
     model = looker_query.get("model")
     explore = looker_query.get("explore")
     try:
@@ -187,13 +224,16 @@ def recover_generated_sql(response: Any, agent: Any) -> int:
       if isinstance(sql, bytes):
         sql = sql.decode("utf-8", "replace")
       if sql and sql.strip():
-        data["generated_sql"] = sql
-        enriched += 1
+        recovered.append((idx, sql))
     except Exception as e:  # pylint: disable=broad-except
       logger.warning(
           "Looker SQL recovery failed for %s.%s: %s", model, explore, e
       )
 
+  for idx, sql in sorted(recovered, key=lambda r: r[0], reverse=True):
+    items.insert(idx + 1, _make_generated_sql_message(items[idx], sql))
+
+  enriched = len(recovered)
   if enriched:
     logger.info(
         "Looker SQL recovery: enriched %d data message(s) for agent %s",

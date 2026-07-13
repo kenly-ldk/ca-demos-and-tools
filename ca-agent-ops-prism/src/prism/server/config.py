@@ -48,6 +48,16 @@ class Settings(pydantic.BaseModel):
       "PRISM_GENAI_CLIENT_LOCATION", "us-central1"
   )
 
+  # Looker CA agents return a *Looker query*, not compiled SQL. When enabled,
+  # PRISM re-compiles that query via the Looker API (run_inline_query,
+  # result_format="sql" — returns SQL WITHOUT executing) and writes it onto the
+  # trace's generated_sql, so the BigQuery SQL is visible in the trace and usable
+  # by query-contains asserts. Best-effort and fail-safe. Disable with
+  # PRISM_RECOVER_LOOKER_SQL=false.
+  recover_looker_sql: bool = (
+      os.getenv("PRISM_RECOVER_LOOKER_SQL", "true").lower() == "true"
+  )
+
   # GCP Projects
   # Comma-separated list for GDA API (e.g., "proj-1,proj-2")
   gcp_gda_projects_raw: str = os.getenv("PRISM_GDA_PROJECTS", "")

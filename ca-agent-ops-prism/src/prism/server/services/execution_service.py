@@ -41,6 +41,7 @@ from prism.server.repositories.suite_repository import SuiteRepository
 from prism.server.repositories.trial_repository import TrialRepository
 from prism.server.services import assert_engine
 from prism.server.services import assertion_mappers
+from prism.server.services import looker_sql
 from prism.server.services import timeline_service
 from prism.server.services.snapshot_service import SnapshotService
 
@@ -235,6 +236,12 @@ class ExecutionService:
 
       # Mark completion time immediately after response
       trial.completed_at = datetime.datetime.now(datetime.timezone.utc)
+
+      # Looker CA agents return a Looker query, not compiled SQL. Recover the
+      # BigQuery SQL onto the trace (best-effort) BEFORE we serialize the trace
+      # or run asserts, so both the trace UI and query-contains see it.
+      if settings.recover_looker_sql:
+        looker_sql.recover_generated_sql(response, agent)
 
       # Save results
       trial.trace_results = []
@@ -492,6 +499,11 @@ class ExecutionService:
         client_id=agent.looker_client_id,
         client_secret=agent.looker_client_secret,
     )
+
+    # Recover compiled BigQuery SQL for Looker agents (best-effort) before
+    # asserts + trace serialization, so both can see it.
+    if settings.recover_looker_sql:
+      looker_sql.recover_generated_sql(response, agent)
 
     # 4. Evaluate Assertions
     results = assert_engine.evaluate_all(

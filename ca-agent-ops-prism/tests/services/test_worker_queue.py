@@ -53,8 +53,12 @@ def worker_service(session_factory):
   # Mock multiprocessing to prevent actual spawning
   with unittest.mock.patch("multiprocessing.get_context") as mock_ctx:
     mock_ctx.return_value.Process = MockProcess
+    # Pin to a single running run so these tests exercise FIFO admission at the
+    # run-limit boundary (auto-promotion, blocking, and oldest-first ordering).
     manager = WorkerProcessManager(
-        max_concurrent_trials=2, session_factory=session_factory
+        max_concurrent_trials=2,
+        max_concurrent_runs=1,
+        session_factory=session_factory,
     )
     yield manager
     manager.stop()

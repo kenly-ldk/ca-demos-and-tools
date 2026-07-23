@@ -48,6 +48,19 @@ class Settings(pydantic.BaseModel):
       "PRISM_GENAI_CLIENT_LOCATION", "us-central1"
   )
 
+  # Worker concurrency.
+  #   worker_max_concurrent_runs  (R): how many runs may be RUNNING at once.
+  #   worker_max_concurrent_trials(T): global ceiling on in-flight trial
+  #       processes across ALL running runs (the RAM / API-quota governor).
+  # The worker admits up to R runs and hands out up to T trial slots across
+  # them round-robin, each run still bounded by its own runs.concurrency.
+  worker_max_concurrent_runs: int = int(
+      os.getenv("PRISM_MAX_CONCURRENT_RUNS", "10")
+  )
+  worker_max_concurrent_trials: int = int(
+      os.getenv("PRISM_MAX_CONCURRENT_TRIALS", "25")
+  )
+
   # Looker CA agents return a *Looker query*, not compiled SQL. When enabled,
   # PRISM re-compiles that query via the Looker API (run_inline_query,
   # result_format="sql" — returns SQL WITHOUT executing) and writes it onto the

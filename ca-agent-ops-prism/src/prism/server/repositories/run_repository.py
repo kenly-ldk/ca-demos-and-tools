@@ -71,20 +71,28 @@ class RunRepository:
     self.session.commit()
     return run
 
-  def promote_next_run(self) -> Run | None:
-    """Promotes the oldest PENDING run to RUNNING if no other run is active."""
-    # 1. Check if any run is already RUNNING
-    active = (
-        self.session.execute(
-            sqlalchemy.select(Run)
-            .where(Run.status == RunStatus.RUNNING)
-            .where(Run.is_archived.is_not(True))
-            .limit(1)
-        )
-        .scalars()
-        .first()
+  def count_running(self) -> int:
+    """Counts runs currently in RUNNING state (non-archived)."""
+    stmt = (
+        sqlalchemy.select(sqlalchemy.func.count())
+        .select_from(Run)
+        .where(Run.status == RunStatus.RUNNING)
+        .where(Run.is_archived.is_not(True))
     )
-    if active:
+    return self.session.scalar(stmt) or 0
+
+  def promote_next_run(self, max_running: int = 1) -> Run | None:
+    """Promotes the oldest PENDING run to RUNNING while under the run limit.
+
+    Args:
+      max_running: Maximum number of runs allowed in RUNNING state at once. If
+        that many runs are already RUNNING, no promotion happens.
+
+    Returns:
+      The promoted Run, or None if the limit is reached or nothing is pending.
+    """
+    # 1. Respect the concurrent-run limit.
+    if self.count_running() >= max_running:
       return None
 
     # 2. Find oldest PENDING run

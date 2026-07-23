@@ -17,6 +17,7 @@
 from fast_depends import Depends
 from fast_depends import inject
 from prism.client import dependencies
+from prism.server.config import settings
 from prism.server.services.worker import WorkerProcessManager
 
 
@@ -26,11 +27,29 @@ class SystemClient:
   @inject
   def start_worker_pool(
       self,
-      num_workers: int = 2,
+      num_workers: int | None = None,
+      max_concurrent_runs: int | None = None,
       service: WorkerProcessManager = Depends(
           dependencies.get_worker_pool_service
       ),
   ) -> None:
-    """Starts the background worker manager."""
-    service.max_concurrent_trials = num_workers
+    """Starts the background worker manager.
+
+    Args:
+      num_workers: Optional override for the global concurrent-trial ceiling (T).
+        Defaults to settings.worker_max_concurrent_trials.
+      max_concurrent_runs: Optional override for the concurrent-run limit (R).
+        Defaults to settings.worker_max_concurrent_runs.
+      service: The (singleton) worker manager to start.
+    """
+    service.max_concurrent_trials = (
+        num_workers
+        if num_workers is not None
+        else settings.worker_max_concurrent_trials
+    )
+    service.max_concurrent_runs = (
+        max_concurrent_runs
+        if max_concurrent_runs is not None
+        else settings.worker_max_concurrent_runs
+    )
     service.start()

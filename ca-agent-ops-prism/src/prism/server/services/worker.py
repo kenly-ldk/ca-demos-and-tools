@@ -115,19 +115,33 @@ class WorkerProcessManager:
 
   def __init__(
       self,
-      max_concurrent_trials: int = 2,
+      max_concurrent_trials: int | None = None,
+      max_concurrent_runs: int | None = None,
       session_factory: Any = db.SessionLocal,
   ):
     if self._initialized:
       return
-    self.max_concurrent_trials = max_concurrent_trials
+    # T: global ceiling on in-flight trial processes across all running runs.
+    self.max_concurrent_trials = (
+        max_concurrent_trials
+        if max_concurrent_trials is not None
+        else settings.worker_max_concurrent_trials
+    )
+    # R: how many runs may be RUNNING simultaneously.
+    self.max_concurrent_runs = (
+        max_concurrent_runs
+        if max_concurrent_runs is not None
+        else settings.worker_max_concurrent_runs
+    )
     self.session_factory = session_factory
     self.stop_event = threading.Event()
     self._thread = None
     self._running = False
     self._initialized = True
     logging.info(
-        "Initialized WorkerProcessManager (Limit: %s)", max_concurrent_trials
+        "Initialized WorkerProcessManager (max_runs=%s, max_trials=%s)",
+        self.max_concurrent_runs,
+        self.max_concurrent_trials,
     )
 
   def start(self):
@@ -220,71 +234,92 @@ class WorkerProcessManager:
           continue
 
   def _start_new_trials(self):
-    """Claims and starts new trials if under concurrency limit."""
+    """Claims and starts new trials across all running runs.
+
+    Admits up to `max_concurrent_runs` (R) runs into RUNNING, then distributes
+    up to `max_concurrent_trials` (T) in-flight trial slots *globally* across
+    those runs round-robin, each run still bounded by its own `concurrency`.
+    A single manager thread does all claiming, so no row locking is required.
+    """
     with self.session_factory() as session:
       r_repo = run_repository.RunRepository(session)
       t_repo = trial_repository.TrialRepository(session)
 
-      # 1. Identify valid active run (running or pending)
-      # Check for existing RUNNING run first
-      active_run = r_repo.list_all(
-          status=execution.RunStatus.RUNNING, include_archived=False, limit=1
+      # 1. Admit pending runs up to the concurrent-run limit R (FIFO by age).
+      while r_repo.count_running() < self.max_concurrent_runs:
+        if (
+            r_repo.promote_next_run(max_running=self.max_concurrent_runs)
+            is None
+        ):
+          break  # limit reached or nothing pending
+
+      # 2. All currently running runs.
+      running_runs = r_repo.list_all(
+          status=execution.RunStatus.RUNNING,
+          include_archived=False,
+          limit=self.max_concurrent_runs,
       )
-
-      running_run = active_run[0] if active_run else None
-
-      if not running_run:
-        # Try to promote next pending
-        running_run = r_repo.promote_next_run()
-
-      if not running_run:
-        # No work to do
+      if not running_runs:
         return
 
-      # Proceed with running_run
-      active_run = running_run
-
-      # 2. Check capacity for THIS active run
+      # 3. Global trial capacity T across ALL runs.
       current_active_trials = t_repo.list_by_status([
           execution.RunStatus.RUNNING,
           execution.RunStatus.EXECUTING,
           execution.RunStatus.EVALUATING,
       ])
-      # Filter trials to only those belonging to the active run
-      active_run_trials = [
-          t for t in current_active_trials if t.run_id == active_run.id
-      ]
-
-      capacity = active_run.concurrency - len(active_run_trials)
-      if capacity <= 0:
+      global_capacity = self.max_concurrent_trials - len(current_active_trials)
+      if global_capacity <= 0:
         return
 
-      # 3. Claim pending trials for this run
-      for _ in range(capacity):
-        trial = t_repo.pick_next_pending_trial(run_id=active_run.id)
-        if not trial:
+      # 4. Per-run headroom = its own concurrency minus its in-flight trials.
+      inflight_by_run: dict[int, int] = {}
+      for t in current_active_trials:
+        inflight_by_run[t.run_id] = inflight_by_run.get(t.run_id, 0) + 1
+      headroom = {
+          run.id: max(0, run.concurrency - inflight_by_run.get(run.id, 0))
+          for run in running_runs
+      }
+
+      # 5. Round-robin allocate global slots (one per run per pass, skipping
+      #    runs at their per-run cap) so later runs don't starve when T < ΣCᵢ.
+      while global_capacity > 0 and any(h > 0 for h in headroom.values()):
+        progressed = False
+        for run in running_runs:
+          if global_capacity <= 0:
+            break
+          if headroom[run.id] <= 0:
+            continue
+
+          trial = t_repo.pick_next_pending_trial(run_id=run.id)
+          if not trial:
+            headroom[run.id] = 0  # no more pending trials for this run
+            continue
+
+          trial_id = trial.id
+          logging.info("Manager claimed trial %s for run %s", trial_id, run.id)
+
+          # Spawn (outside nested loops' concern; commit updates PID/status).
+          try:
+            ctx = multiprocessing.get_context("spawn")
+            p = ctx.Process(target=execute_trial, args=(trial_id,), daemon=True)
+            p.start()
+            trial.trial_pid = p.pid
+            session.commit()
+            logging.info("Spawned process %s for trial %s", p.pid, trial_id)
+            headroom[run.id] -= 1
+            global_capacity -= 1
+            progressed = True
+          except Exception as e:
+            logging.error(
+                "Failed to spawn process for trial %s: %s", trial_id, e
+            )
+            trial.status = execution.RunStatus.FAILED
+            trial.error_message = f"Process spawn failed: {str(e)}"
+            session.commit()
+            headroom[run.id] -= 1
+        if not progressed:
           break
-
-        trial_id = trial.id
-        logging.info(
-            "Manager claimed trial %s for run %s", trial_id, active_run.id
-        )
-
-        # 4. Spawn (Outside session to avoid leaks/locks)
-        try:
-          ctx = multiprocessing.get_context("spawn")
-          p = ctx.Process(target=execute_trial, args=(trial_id,), daemon=True)
-          p.start()
-
-          # Update PID immediately
-          trial.trial_pid = p.pid
-          session.commit()
-          logging.info("Spawned process %s for trial %s", p.pid, trial_id)
-        except Exception as e:
-          logging.error("Failed to spawn process for trial %s: %s", trial_id, e)
-          trial.status = execution.RunStatus.FAILED
-          trial.error_message = f"Process spawn failed: {str(e)}"
-          session.commit()
 
   def _aggregate_run_statuses(self):
     """Checks active runs for completion."""

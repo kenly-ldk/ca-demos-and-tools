@@ -109,6 +109,6 @@ logger.info("Exporting Dash server instance...")
 app = prism.ui.app.server
 
 logger.info("Starting background worker pool...")
-PrismClient().system.start_worker_pool(num_workers=2)
+PrismClient().system.start_worker_pool()
 
 logger.info("Prism App ready.")

@@ -120,7 +120,7 @@ if __name__ == "__main__":
   # Reloader starts a second process; we only want the worker in 'main'.
   debug = True
   if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not debug:
-    PrismClient().system.start_worker_pool(num_workers=2)
+    PrismClient().system.start_worker_pool()
 
   port = int(os.environ.get("PORT", 8080))
   app.run(host="0.0.0.0", port=port, debug=debug)

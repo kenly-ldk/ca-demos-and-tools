@@ -39,7 +39,7 @@ from prism.ui.utils import typed_callback
 )
 def load_project_id_options_add(pathname: str):
   """Loads configured GDA projects as options for the Select component."""
-  if pathname != "/agents/onboard/new":
+  if not pathname or pathname.rstrip("/") != "/agents/onboard/new":
     return dash.no_update
   projects = get_client().agents.get_configured_gda_projects()
   return [{"label": p, "value": p} for p in projects]

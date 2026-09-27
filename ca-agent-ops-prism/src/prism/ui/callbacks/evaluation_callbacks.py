@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 )
 def render_run_list(pathname: str, search: str):
   """Renders the evaluations list, filtered by URL search parameters."""
-  if pathname != "/evaluations":
+  if not pathname or pathname.rstrip("/") != "/evaluations":
     return dash.no_update
 
   # Parse Filters from URL
@@ -201,7 +201,7 @@ def sync_eval_filters_to_url(search: str):
 def populate_eval_filter_options(pathname: str):
   """Populate Agent and Test Suite filter options."""
 
-  if pathname != "/evaluations":
+  if not pathname or pathname.rstrip("/") != "/evaluations":
     return typed_callback.no_update, dash.no_update
 
   client = get_client()

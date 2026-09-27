@@ -835,7 +835,7 @@ def populate_run_selects(
     pathname: str | None, selected_suite_id: str | None, search: str | None
 ):
   """Populates the run selection dropdowns."""
-  if not pathname or pathname != "/compare":
+  if not pathname or pathname.rstrip("/") != "/compare":
     return dash.no_update, dash.no_update, dash.no_update
 
   # Parse IDs from search

@@ -123,4 +123,5 @@ if __name__ == "__main__":
     PrismClient().system.start_worker_pool()
 
   port = int(os.environ.get("PORT", 8080))
-  app.run(host="0.0.0.0", port=port, debug=debug)
+  host = os.environ.get("HOST", "::")
+  app.run(host=host, port=port, debug=debug)

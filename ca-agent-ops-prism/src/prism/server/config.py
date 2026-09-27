@@ -76,6 +76,17 @@ class Settings(pydantic.BaseModel):
   gcp_gda_projects_raw: str = os.getenv("PRISM_GDA_PROJECTS", "")
   # Single project for Gen AI
   gcp_genai_project: str | None = os.getenv("PRISM_GENAI_CLIENT_PROJECT")
+  # Model backing the ai-judge / suggestion features. Empty => the client's
+  # DEFAULT_MODEL (gemini-2.5-pro).
+  gcp_genai_model: str | None = os.getenv("PRISM_GENAI_CLIENT_MODEL")
+  # Optional path to a credentials JSON (service-account key or a gcloud ADC
+  # file such as ~/.config/gcloud/<config-name>.json) used ONLY for the Gen AI
+  # calls. Empty => the process-wide ADC, i.e. the same identity used for the
+  # GDA agents and BigQuery. Set it to run the judge under a different
+  # identity/project than the agents under test.
+  gcp_genai_credentials_file: str | None = os.getenv(
+      "PRISM_GENAI_CLIENT_CREDENTIALS_FILE"
+  )
 
   @property
   def gcp_gda_projects(self) -> list[str]:

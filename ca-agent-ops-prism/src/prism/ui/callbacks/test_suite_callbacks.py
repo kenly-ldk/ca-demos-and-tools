@@ -132,7 +132,7 @@ def render_eval_agent_details(agent_id):
 def update_test_suites_list(pathname: str, search: str):
   """Renders the list of test suites on the dashboard."""
 
-  if pathname != "/test_suites":
+  if not pathname or pathname.rstrip("/") != "/test_suites":
     return typed_callback.no_update, typed_callback.no_update
 
   # Parse Filters from URL
